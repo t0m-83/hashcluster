@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="csrf-token" content={get_csrf_token()} />
+    <title>HashCluster</title>
+    <style>
+      *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+      body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; min-height: 100vh; }
+      .card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 1.5rem; }
+      .btn { padding: 0.5rem 1.25rem; border-radius: 8px; font-weight: 600; font-size: 0.875rem; cursor: pointer; border: none; transition: all 0.15s; }
+      .btn-primary { background: #3b82f6; color: white; }
+      .btn-primary:hover:not(:disabled) { background: #2563eb; }
+      .btn-danger { background: #ef4444; color: white; }
+      .btn-danger:hover:not(:disabled) { background: #dc2626; }
+      .btn-success { background: #22c55e; color: white; }
+      .btn-success:hover:not(:disabled) { background: #16a34a; }
+      .btn-secondary { background: #475569; color: white; }
+      .btn-secondary:hover:not(:disabled) { background: #374151; }
+      button:disabled { opacity: 0.4; cursor: not-allowed; }
+      .input { width: 100%; padding: 0.5rem 0.75rem; background: #0f172a; border: 1px solid #475569; border-radius: 8px; color: #e2e8f0; font-size: 0.875rem; outline: none; }
+      .input:focus { border-color: #3b82f6; box-shadow: 0 0 0 2px rgba(59,130,246,0.2); }
+      .badge { display: inline-flex; align-items: center; padding: 0.2rem 0.6rem; border-radius: 9999px; font-size: 0.75rem; font-weight: 600; }
+      .badge-green { background: #166534; color: #86efac; }
+      .badge-blue { background: #1e3a5f; color: #93c5fd; }
+      .badge-yellow { background: #713f12; color: #fde68a; }
+      .badge-red { background: #7f1d1d; color: #fca5a5; }
+      .badge-gray { background: #334155; color: #94a3b8; }
+      table { width: 100%; border-collapse: collapse; }
+      th { text-align: left; padding: 0.75rem 1rem; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: #94a3b8; border-bottom: 1px solid #334155; }
+      td { padding: 0.75rem 1rem; font-size: 0.875rem; border-bottom: 1px solid #1e293b; }
+      tr:hover td { background: rgba(255,255,255,0.02); }
+      .flash-success { background: #14532d; border: 1px solid #166534; color: #86efac; padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem; }
+      .flash-error { background: #7f1d1d; border: 1px solid #991b1b; color: #fca5a5; padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem; }
+      .progress-bar { height: 8px; background: #334155; border-radius: 9999px; overflow: hidden; }
+      .progress-fill { height: 100%; background: linear-gradient(90deg, #3b82f6, #8b5cf6); border-radius: 9999px; transition: width 0.3s ease; }
+    </style>
+  </head>
+  <body>
+    <%= @inner_content %>
+    <script src="/assets/app.js"></script>
+  </body>
+</html>
