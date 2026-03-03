@@ -13,6 +13,7 @@ defmodule HashCluster.Application do
       {HashCluster.Coordinator, []},
       {HashCluster.WorkerSupervisor, []},
       {HashCluster.NodeMonitor, []}
+      # NodeLoader n'a pas besoin d'être supervisé, ses fonctions sont appelées via RPC
     ]
 
     opts = [strategy: :one_for_one, name: HashCluster.Supervisor]

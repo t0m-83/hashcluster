@@ -26,7 +26,7 @@ defmodule HashCluster.MixProject do
   defp deps do
     [
       {:phoenix, "~> 1.7"},
-      {:phoenix_live_view, "~> 0.20.17"},
+      {:phoenix_live_view, "~> 0.20"},
       {:phoenix_html, "~> 4.0"},
       {:esbuild, "~> 0.8", runtime: Mix.env() == :dev},
       {:bandit, "~> 1.2"},

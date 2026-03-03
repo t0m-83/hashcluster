@@ -124,7 +124,10 @@ ssh user@192.168.1.20
 cd hashcluster
 mix deps.get && mix compile
 
-WORKER_NAME=worker1@192.168.1.20 MASTER_NODE=master@192.168.1.10 CLUSTER_COOKIE=mon_secret ./start_worker.sh
+WORKER_NAME=worker1@192.168.1.20 \
+MASTER_NODE=master@192.168.1.10 \
+CLUSTER_COOKIE=mon_secret \
+./start_worker.sh
 ```
 
 #### Depuis l'interface web (maître) :
