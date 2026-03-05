@@ -52,7 +52,7 @@ defmodule HashCluster.NodeLoader do
         # pour qu'il survive indépendamment
         pid = spawn(fn ->
           Process.flag(:trap_exit, true)
-          children = [{HashCluster.WorkerSupervisor, []}]
+          children = [{HashCluster.CancelFlag, []}, {HashCluster.WorkerSupervisor, []}]
           {:ok, sup} = Supervisor.start_link(children,
             strategy: :one_for_one, name: HashCluster.WorkerApp)
           Logger.info("[#{node()}] Worker prêt (supervisor: #{inspect(sup)})")
@@ -78,6 +78,7 @@ defmodule HashCluster.NodeLoader do
       HashCluster.WorkerSupervisor,
       HashCluster.NodeLoader,
       HashCluster.MnesiaStore,
+      HashCluster.CancelFlag,
       HashCluster.BroadcastThrottle,
     ]
 

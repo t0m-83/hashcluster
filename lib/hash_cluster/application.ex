@@ -9,6 +9,7 @@ defmodule HashCluster.Application do
     children = [
       {Phoenix.PubSub, name: HashCluster.PubSub},
       HashClusterWeb.Endpoint,
+      {HashCluster.CancelFlag, []},
       {HashCluster.BroadcastThrottle, []},
       {HashCluster.Coordinator, []},
       {HashCluster.WorkerSupervisor, []},

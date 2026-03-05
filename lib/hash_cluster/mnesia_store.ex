@@ -43,7 +43,6 @@ defmodule HashCluster.MnesiaStore do
     :mnesia.transaction(fn ->
       :mnesia.write({@table_jobs, id, directory, :pending, DateTime.utc_now(), nil, 0, 0})
     end)
-    broadcast_now()
     id
   end
 
@@ -61,7 +60,10 @@ defmodule HashCluster.MnesiaStore do
         _ -> :ok
       end
     end)
-    broadcast_now()
+    # Broadcaster uniquement pour les vrais changements d'état
+    if Keyword.has_key?(updates, :status) do
+      broadcast_now()
+    end
   end
 
   def get_current_job do
@@ -79,7 +81,7 @@ defmodule HashCluster.MnesiaStore do
       finished_at: finished, total: total, done: done}
   end
 
-  # ---- File & counter operations (appelées via RPC depuis les workers) ----
+  # ---- File & counter operations ----
 
   def save_file(path, name, hash, worker_node) do
     :mnesia.transaction(fn ->
@@ -88,8 +90,21 @@ defmodule HashCluster.MnesiaStore do
     :ok
   end
 
-  # increment_done est appelé séparément après save_file
-  # Le broadcast est throttlé pour éviter d'inonder le LiveView
+  # Un seul appel RPC au lieu de deux (save_file + increment_done)
+  # Réduit de moitié la latence réseau pour les workers distants
+  def save_file_and_increment(path, name, hash, worker_node, job_id) do
+    :mnesia.transaction(fn ->
+      :mnesia.write({@table_files, path, name, hash, worker_node, DateTime.utc_now(), :done})
+      case :mnesia.read(@table_jobs, job_id) do
+        [{@table_jobs, ^job_id, dir, status, started, finished, total, done}] ->
+          :mnesia.write({@table_jobs, job_id, dir, status, started, finished, total, done + 1})
+        _ -> :ok
+      end
+    end)
+    :ok
+  end
+
+  # Pas de broadcast — le LiveView poll toutes les 2s
   def increment_done(job_id) do
     :mnesia.transaction(fn ->
       case :mnesia.read(@table_jobs, job_id) do
@@ -98,7 +113,7 @@ defmodule HashCluster.MnesiaStore do
         _ -> :ok
       end
     end)
-    HashCluster.BroadcastThrottle.notify()
+    :ok
   end
 
   def list_files do
@@ -108,6 +123,12 @@ defmodule HashCluster.MnesiaStore do
       {:atomic, files} -> Enum.map(files, &file_to_map/1)
       _ -> []
     end
+  end
+
+  def count_files do
+    :mnesia.table_info(@table_files, :size)
+  rescue
+    _ -> 0
   end
 
   def clear_files do
@@ -136,36 +157,8 @@ end
 
 defmodule HashCluster.BroadcastThrottle do
   use GenServer
-
-  @interval 500  # ms entre deux broadcasts max
-
-  def start_link(_), do: GenServer.start_link(__MODULE__, :no_timer, name: __MODULE__)
-
-  # Appelé depuis increment_done (potentiellement des milliers de fois/sec)
-  def notify do
-    case Process.whereis(__MODULE__) do
-      nil -> :ok
-      pid -> send(pid, :notify)
-    end
-  end
-
+  def start_link(_), do: GenServer.start_link(__MODULE__, :idle, name: __MODULE__)
+  def notify, do: :ok
   @impl true
-  def init(:no_timer), do: {:ok, :idle}
-
-  @impl true
-  def handle_info(:notify, :idle) do
-    # Premier signal : programmer un broadcast dans @interval ms
-    Process.send_after(self(), :flush, @interval)
-    {:noreply, :pending}
-  end
-
-  def handle_info(:notify, :pending) do
-    # Timer déjà en cours, ignorer
-    {:noreply, :pending}
-  end
-
-  def handle_info(:flush, _state) do
-    HashCluster.MnesiaStore.broadcast_now()
-    {:noreply, :idle}
-  end
+  def init(state), do: {:ok, state}
 end

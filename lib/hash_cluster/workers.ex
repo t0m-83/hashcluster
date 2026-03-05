@@ -14,37 +14,74 @@ end
 defmodule HashCluster.FileWorker do
   require Logger
 
-  # Traite un batch complet de fichiers, puis signale au Coordinator qu'il a terminé
-  # et redemande immédiatement un nouveau batch (pull model)
-  def process_batch(job_id, files, master_node, coordinator_node) do
-    Logger.info("[#{node()}] Traitement batch #{length(files)} fichiers")
+  @concurrency 8
 
-    Enum.each(files, fn file_path ->
-      case compute_hash(file_path) do
-        {:ok, hash} ->
-          name = Path.basename(file_path)
-          :rpc.call(master_node, HashCluster.MnesiaStore, :save_file,
-                    [file_path, name, hash, node()], 30_000)
-          :rpc.call(master_node, HashCluster.MnesiaStore, :increment_done,
-                    [job_id], 30_000)
-        {:error, reason} ->
-          Logger.warning("✗ #{file_path}: #{inspect(reason)}")
-      end
+  def process_batch(job_id, files, master_node, coordinator_node) do
+    Logger.info("[#{node()}] Batch #{length(files)} fichiers")
+
+    # Traitement parallèle — chaque tâche est indépendante
+    files
+    |> Task.async_stream(
+      fn file_path ->
+        unless HashCluster.CancelFlag.cancelled?(job_id) do
+          case compute_hash(file_path) do
+            {:ok, hash} ->
+              name = Path.basename(file_path)
+              case :rpc.call(master_node, HashCluster.MnesiaStore, :save_file_and_increment,
+                             [file_path, name, hash, node(), job_id], 30_000) do
+                {:badrpc, reason} ->
+                  Logger.warning("[#{node()}] RPC save échoué #{Path.basename(file_path)}: #{inspect(reason)}")
+                _ -> :ok
+              end
+            {:error, reason} ->
+              Logger.warning("[#{node()}] ✗ #{Path.basename(file_path)}: #{inspect(reason)}")
+          end
+        end
+      end,
+      max_concurrency: @concurrency,
+      timeout: 120_000,
+      ordered: false
+    )
+    |> Enum.each(fn
+      {:ok, _}       -> :ok
+      {:exit, reason} -> Logger.warning("[#{node()}] Task exit: #{inspect(reason)}")
     end)
 
-    # Signaler la fin du batch au Coordinator
-    :rpc.call(coordinator_node, HashCluster.Coordinator, :batch_done,
-              [node(), length(files)], 30_000)
+    # Signaler fin + demander le prochain batch en un seul appel
+    if HashCluster.CancelFlag.cancelled?(job_id) do
+      # Signaler la fin proprement même en cas d'annulation
+      :rpc.call(coordinator_node, HashCluster.Coordinator, :batch_done,
+                [node(), length(files)], 10_000)
+    else
+      fetch_next(job_id, files, master_node, coordinator_node)
+    end
+  end
 
-    # Pull : demander immédiatement un nouveau batch
-    case :rpc.call(coordinator_node, HashCluster.Coordinator, :request_batch,
-                   [node()], 30_000) do
-      {:ok, next_batch} when next_batch != [] ->
-        Logger.info("[#{node()}] Nouveau batch reçu: #{length(next_batch)} fichiers")
+  defp fetch_next(job_id, last_batch, master_node, coordinator_node) do
+    case :rpc.call(coordinator_node, HashCluster.Coordinator, :next_batch,
+                   [node(), length(last_batch)], 30_000) do
+      {:ok, next_batch} ->
+        Logger.info("[#{node()}] Prochain batch: #{length(next_batch)} fichiers")
         process_batch(job_id, next_batch, master_node, coordinator_node)
 
-      _ ->
-        Logger.info("[#{node()}] File épuisée, worker #{node()} en attente")
+      {:wait, []} ->
+        # D'autres workers ont encore des batches en vol — attendre et réessayer
+        Logger.info("[#{node()}] Attente (queue vide, job en cours)...")
+        Process.sleep(300)
+        # Appel avec 0 pour ne pas re-décrémenter in_flight
+        case :rpc.call(coordinator_node, HashCluster.Coordinator, :next_batch,
+                       [node(), 0], 30_000) do
+          {:ok, next_batch} ->
+            process_batch(job_id, next_batch, master_node, coordinator_node)
+          _ ->
+            Logger.info("[#{node()}] Terminé sur #{node()}")
+        end
+
+      {:done, []} ->
+        Logger.info("[#{node()}] Job terminé sur #{node()}")
+
+      {:badrpc, reason} ->
+        Logger.error("[#{node()}] RPC next_batch échoué: #{inspect(reason)}")
     end
   end
 

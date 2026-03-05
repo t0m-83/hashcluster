@@ -2,13 +2,17 @@ defmodule HashClusterWeb.DashboardLive do
   use HashClusterWeb, :live_view
   require Logger
 
-  @refresh_interval 2_000
+  # Refresh léger : job + nodes (pas les fichiers)
+  @refresh_interval 1_000
+  # Refresh lourd : liste complète des fichiers (coûteux avec 20k entrées)
+  @files_refresh_interval 3_000
 
   @impl true
   def mount(_params, _session, socket) do
     if connected?(socket) do
       Phoenix.PubSub.subscribe(HashCluster.PubSub, "dashboard")
       Process.send_after(self(), :refresh, @refresh_interval)
+      Process.send_after(self(), :refresh_files, @files_refresh_interval)
     end
 
     {:ok,
@@ -16,32 +20,56 @@ defmodule HashClusterWeb.DashboardLive do
      |> assign(:nodes, HashCluster.NodeMonitor.list_nodes())
      |> assign(:job, HashCluster.MnesiaStore.get_current_job())
      |> assign(:files, HashCluster.MnesiaStore.list_files())
+     |> assign(:file_count, HashCluster.MnesiaStore.count_files())
      |> assign(:new_node, "")
      |> assign(:directory, "/tmp")
-     |> assign(:search, "")}
+     |> assign(:search, "")
+     |> assign(:show_files, false)}
   end
 
-  # ---- handle_info : ne jamais écraser :search ni :directory ----
+  # ---- handle_info ----
 
   @impl true
+  # Changement d'état important (start/stop/done) — met à jour le job uniquement
   def handle_info(:state_changed, socket) do
-    {:noreply,
-     socket
-     |> assign(:job, HashCluster.MnesiaStore.get_current_job())
-     |> assign(:files, HashCluster.MnesiaStore.list_files())}
+    job = HashCluster.MnesiaStore.get_current_job()
+    # Quand le job se termine, charger les fichiers et les afficher automatiquement
+    if job && job.status in [:done, :stopped] && is_running?(socket.assigns.job) do
+      {:noreply,
+       socket
+       |> assign(:job, job)
+       |> assign(:show_files, true)
+       |> assign(:files, HashCluster.MnesiaStore.list_files())
+       |> assign(:file_count, HashCluster.MnesiaStore.count_files())}
+    else
+      {:noreply, assign(socket, :job, job)}
+    end
   end
 
   def handle_info(:cluster_changed, socket) do
     {:noreply, assign(socket, :nodes, HashCluster.NodeMonitor.list_nodes())}
   end
 
+  # Refresh léger toutes les 1s : progression + nodes uniquement
   def handle_info(:refresh, socket) do
     Process.send_after(self(), :refresh, @refresh_interval)
     {:noreply,
      socket
      |> assign(:nodes, HashCluster.NodeMonitor.list_nodes())
      |> assign(:job, HashCluster.MnesiaStore.get_current_job())
-     |> assign(:files, HashCluster.MnesiaStore.list_files())}
+     |> assign(:file_count, HashCluster.MnesiaStore.count_files())}
+  end
+
+  # Refresh lourd toutes les 3s : liste complète des fichiers
+  def handle_info(:refresh_files, socket) do
+    Process.send_after(self(), :refresh_files, @files_refresh_interval)
+    # Ne charger la liste que si elle est visible ET qu'aucun job ne tourne
+    # (pendant un job, c'est le navigateur qui rame avec 20k lignes en live)
+    if socket.assigns.show_files and not is_running?(socket.assigns.job) do
+      {:noreply, assign(socket, :files, HashCluster.MnesiaStore.list_files())}
+    else
+      {:noreply, socket}
+    end
   end
 
   # ---- handle_event ----
@@ -58,8 +86,7 @@ defmodule HashClusterWeb.DashboardLive do
         {:noreply,
          socket
          |> put_flash(:info, "Calcul démarré pour #{dir}")
-         |> assign(:job, HashCluster.MnesiaStore.get_current_job())
-         |> assign(:files, HashCluster.MnesiaStore.list_files())}
+         |> assign(:job, HashCluster.MnesiaStore.get_current_job())}
       {:error, :already_running} ->
         {:noreply, put_flash(socket, :error, "Un calcul est déjà en cours")}
       {:error, :directory_not_found} ->
@@ -72,7 +99,10 @@ defmodule HashClusterWeb.DashboardLive do
     {:noreply,
      socket
      |> put_flash(:info, "Calcul arrêté")
-     |> assign(:job, HashCluster.MnesiaStore.get_current_job())}
+     |> assign(:job, HashCluster.MnesiaStore.get_current_job())
+     |> assign(:show_files, true)
+     |> assign(:files, HashCluster.MnesiaStore.list_files())
+     |> assign(:file_count, HashCluster.MnesiaStore.count_files())}
   end
 
   def handle_event("clear_data", _params, socket) do
@@ -80,8 +110,10 @@ defmodule HashClusterWeb.DashboardLive do
     {:noreply,
      socket
      |> put_flash(:info, "Données effacées")
-     |> assign(:job, HashCluster.MnesiaStore.get_current_job())
-     |> assign(:files, [])}
+     |> assign(:job, nil)
+     |> assign(:files, [])
+     |> assign(:file_count, 0)
+     |> assign(:show_files, false)}
   end
 
   def handle_event("update_node", %{"node" => node}, socket) do
@@ -110,38 +142,34 @@ defmodule HashClusterWeb.DashboardLive do
      |> assign(:nodes, HashCluster.NodeMonitor.list_nodes())}
   end
 
-  # Recherche live : phx-keyup envoie {"key" => ..., "value" => ...}
   def handle_event("search", %{"value" => q}, socket) do
     {:noreply, assign(socket, :search, q)}
   end
-
   def handle_event("search", params, socket) do
     q = Map.get(params, "value", Map.get(params, "search", ""))
     {:noreply, assign(socket, :search, q)}
   end
-
   def handle_event("clear_search", _params, socket) do
     {:noreply, assign(socket, :search, "")}
   end
 
+  def handle_event("load_files", _params, socket) do
+    {:noreply,
+     socket
+     |> assign(:show_files, true)
+     |> assign(:files, HashCluster.MnesiaStore.list_files())
+     |> assign(:file_count, HashCluster.MnesiaStore.count_files())}
+  end
+
   def handle_event("export_json", _params, socket) do
     files = socket.assigns.files
-
     rows = Enum.map(files, fn f ->
-      %{
-        name:        f.name,
-        path:        f.path,
-        hash_sha256: f.hash,
-        worker:      to_string(f.worker_node),
-        computed_at: fmt_dt(f.computed_at)
-      }
+      %{name: f.name, path: f.path, hash_sha256: f.hash,
+        worker: to_string(f.worker_node), computed_at: fmt_dt(f.computed_at)}
     end)
-
-    json    = Jason.encode!(%{exported_at: DateTime.utc_now(), total: length(rows), files: rows}, pretty: true)
-    now     = Calendar.strftime(DateTime.utc_now(), "%Y%m%d_%H%M%S")
-    filename = "hashcluster_export_#{now}.json"
-
-    {:noreply, push_event(socket, "download_json", %{filename: filename, content: json})}
+    json = Jason.encode!(%{exported_at: DateTime.utc_now(), total: length(rows), files: rows}, pretty: true)
+    now  = Calendar.strftime(DateTime.utc_now(), "%Y%m%d_%H%M%S")
+    {:noreply, push_event(socket, "download_json", %{filename: "hashcluster_export_#{now}.json", content: json})}
   end
 
   # ---- Helpers ----
@@ -157,7 +185,7 @@ defmodule HashClusterWeb.DashboardLive do
 
   defp job_badge(nil), do: {"—", "badge-gray"}
   defp job_badge(%{status: :running}), do: {"⚡ En cours", "badge-blue"}
-  defp job_badge(%{status: :done}), do: {"✓ Terminé", "badge-green"}
+  defp job_badge(%{status: :done}),    do: {"✓ Terminé", "badge-green"}
   defp job_badge(%{status: :stopped}), do: {"⏹ Arrêté", "badge-yellow"}
   defp job_badge(%{status: :pending}), do: {"⏳ En attente", "badge-gray"}
   defp job_badge(_), do: {"—", "badge-gray"}
@@ -251,9 +279,7 @@ defmodule HashClusterWeb.DashboardLive do
             <label style="font-size:0.75rem; color:#94a3b8; display:block; margin-bottom:0.35rem;">Connecter un worker (nom@host)</label>
             <div style="display:flex; gap:0.5rem;">
               <input type="text" name="node" class="input" value={@new_node} placeholder="worker1@192.168.1.20" />
-              <button type="submit" class="btn btn-primary" disabled={@new_node == ""} style="white-space:nowrap;">
-                + Ajouter
-              </button>
+              <button type="submit" class="btn btn-primary" disabled={@new_node == ""} style="white-space:nowrap;">+ Ajouter</button>
             </div>
           </form>
 
@@ -267,9 +293,7 @@ defmodule HashClusterWeb.DashboardLive do
                 </span>
                 <%= if n != node() do %>
                   <button class="btn btn-danger" style="padding:0.2rem 0.6rem; font-size:0.72rem;"
-                    phx-click="disconnect_node" phx-value-node={n}>
-                    Retirer
-                  </button>
+                    phx-click="disconnect_node" phx-value-node={n}>Retirer</button>
                 <% end %>
               </div>
             <% end %>
@@ -277,10 +301,10 @@ defmodule HashClusterWeb.DashboardLive do
         </div>
       </div>
 
-      <%!-- Stats --%>
+      <%!-- Stats — utilise file_count (O(1)) au lieu de length(@files) (O(n)) --%>
       <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:1rem; margin-bottom:1rem;">
         <%= for {label, value, color} <- [
-          {"Fichiers hashés", length(@files), "#60a5fa"},
+          {"Fichiers hashés", @file_count, "#60a5fa"},
           {"Nœuds actifs", length(@nodes), "#34d399"},
           {"Progression", "#{progress_pct(@job)}%", "#a78bfa"},
           {"État", if(@job, do: to_string(@job.status), else: "idle"), "#f9a8d4"}
@@ -294,92 +318,105 @@ defmodule HashClusterWeb.DashboardLive do
 
       <%!-- Files table --%>
       <div id="export-container" phx-hook="DownloadJson" class="card">
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
-          <h2 style="font-size:1rem; font-weight:700; color:#f1f5f9;">
-            📋 Fichiers analysés
-          </h2>
-          <div style="display:flex; align-items:center; gap:0.75rem;">
-            <button class="btn btn-secondary"
-              style="font-size:0.8rem; display:flex; align-items:center; gap:0.4rem;"
-              phx-click="export_json"
-              disabled={@files == []}>
-              ⬇ Exporter JSON
-            </button>
-            <input
-              type="text"
-              id="search-input"
-              class="input"
-              style="max-width:280px;"
-              value={@search}
-              placeholder="🔍 Rechercher nom ou chemin…"
-              phx-change="search"
-              phx-keyup="search"
-              phx-debounce="100"
-            />
-            <%= if @search != "" do %>
-              <button type="button" class="btn btn-secondary"
-                style="padding:0.4rem 0.6rem; font-size:0.75rem;"
-                phx-click="clear_search">
-                ✕
-              </button>
-            <% end %>
-          </div>
-        </div>
-
-        <% display = filtered_files(@files, @search) %>
-
-        <%= if @files == [] do %>
-          <div style="text-align:center; padding:3rem; color:#475569;">
-            <div style="font-size:2.5rem; margin-bottom:0.5rem;">📂</div>
-            <p>Aucun fichier analysé pour l'instant.</p>
-            <p style="font-size:0.75rem; margin-top:0.25rem;">Démarrez un calcul pour voir les résultats ici.</p>
+        <%= if is_running?(@job) do %>
+          <%!-- Pendant l'analyse : afficher uniquement la progression, pas la table --%>
+          <div style="text-align:center; padding:2rem; color:#94a3b8;">
+            <div style="font-size:2.5rem; margin-bottom:1rem; animation: pulse 1.5s infinite;">⚙️</div>
+            <p style="font-size:1rem; font-weight:600; color:#f1f5f9; margin-bottom:0.5rem;">
+              Analyse en cours…
+            </p>
+            <p style="font-size:0.85rem; margin-bottom:1.5rem;">
+              <%= @file_count %> / <%= if @job, do: @job.total, else: "?" %> fichiers traités
+            </p>
+            <p style="font-size:0.75rem; color:#475569;">
+              La liste des fichiers sera affichée à la fin de l'analyse pour ne pas surcharger le navigateur.
+            </p>
           </div>
         <% else %>
-          <%= if display == [] do %>
-            <div style="text-align:center; padding:2rem; color:#475569;">
-              <p>Aucun résultat pour <strong style="color:#94a3b8;">"<%= @search %>"</strong></p>
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
+            <h2 style="font-size:1rem; font-weight:700; color:#f1f5f9;">
+              📋 Fichiers analysés
+            </h2>
+            <div style="display:flex; align-items:center; gap:0.75rem;">
+              <%= if not @show_files and @file_count > 0 do %>
+                <button class="btn btn-primary"
+                  style="font-size:0.8rem;"
+                  phx-click="load_files">
+                  📂 Afficher les <%= @file_count %> fichiers
+                </button>
+              <% end %>
+              <button class="btn btn-secondary"
+                style="font-size:0.8rem;"
+                phx-click="export_json"
+                disabled={@files == []}>
+                ⬇ Exporter JSON
+              </button>
+              <%= if @show_files do %>
+                <input
+                  type="text"
+                  id="search-input"
+                  class="input"
+                  style="max-width:280px;"
+                  value={@search}
+                  placeholder="🔍 Rechercher nom ou chemin…"
+                  phx-change="search"
+                  phx-keyup="search"
+                  phx-debounce="100"
+                />
+                <%= if @search != "" do %>
+                  <button type="button" class="btn btn-secondary"
+                    style="padding:0.4rem 0.6rem; font-size:0.75rem;"
+                    phx-click="clear_search">✕</button>
+                <% end %>
+              <% end %>
+            </div>
+          </div>
+
+          <%= if not @show_files do %>
+            <div style="text-align:center; padding:3rem; color:#475569;">
+              <div style="font-size:2.5rem; margin-bottom:0.5rem;">📂</div>
+              <%= if @file_count == 0 do %>
+                <p>Aucun fichier analysé pour l'instant.</p>
+                <p style="font-size:0.75rem; margin-top:0.25rem;">Démarrez un calcul pour voir les résultats ici.</p>
+              <% else %>
+                <p style="color:#94a3b8;"><%= @file_count %> fichiers disponibles.</p>
+                <button class="btn btn-primary" style="margin-top:1rem;" phx-click="load_files">
+                  📂 Afficher les fichiers
+                </button>
+              <% end %>
             </div>
           <% else %>
-            <div style="overflow-x:auto; max-height:500px; overflow-y:auto;">
-              <table>
-                <thead style="position:sticky; top:0; background:#1e293b; z-index:1;">
-                  <tr>
-                    <th>Nom</th>
-                    <th>Chemin</th>
-                    <th>Hash SHA-256</th>
-                    <th>Worker</th>
-                    <th>Date</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <%= for f <- display do %>
+            <% display = filtered_files(@files, @search) %>
+            <%= if display == [] do %>
+              <div style="text-align:center; padding:2rem; color:#475569;">
+                <p>Aucun résultat pour <strong style="color:#94a3b8;">"<%= @search %>"</strong></p>
+              </div>
+            <% else %>
+              <div style="overflow-x:auto; max-height:500px; overflow-y:auto;">
+                <table>
+                  <thead style="position:sticky; top:0; background:#1e293b; z-index:1;">
                     <tr>
-                      <td style="font-weight:500; color:#f1f5f9; max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
-                        <%= f.name %>
-                      </td>
-                      <td style="font-family:monospace; font-size:0.73rem; color:#94a3b8; max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title={f.path}>
-                        <%= f.path %>
-                      </td>
-                      <td style="font-family:monospace; font-size:0.7rem; color:#60a5fa;" title={f.hash}>
-                        <%= String.slice(f.hash || "", 0, 20) %>…
-                      </td>
-                      <td>
-                        <span class="badge badge-blue" style="font-size:0.65rem; font-family:monospace;">
-                          <%= f.worker_node %>
-                        </span>
-                      </td>
-                      <td style="font-size:0.75rem; color:#64748b; white-space:nowrap;">
-                        <%= fmt_dt(f.computed_at) %>
-                      </td>
+                      <th>Nom</th><th>Chemin</th><th>Hash SHA-256</th><th>Worker</th><th>Date</th>
                     </tr>
-                  <% end %>
-                </tbody>
-              </table>
-            </div>
-            <div style="margin-top:0.75rem; font-size:0.75rem; color:#64748b;">
-              <%= length(display) %> / <%= length(@files) %> fichier(s)
-              <%= if @search != "", do: " · filtre : \"#{@search}\"" %>
-            </div>
+                  </thead>
+                  <tbody>
+                    <%= for f <- display do %>
+                      <tr>
+                        <td style="font-weight:500; color:#f1f5f9; max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"><%= f.name %></td>
+                        <td style="font-family:monospace; font-size:0.73rem; color:#94a3b8; max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title={f.path}><%= f.path %></td>
+                        <td style="font-family:monospace; font-size:0.7rem; color:#60a5fa;" title={f.hash}><%= String.slice(f.hash || "", 0, 20) %>…</td>
+                        <td><span class="badge badge-blue" style="font-size:0.65rem; font-family:monospace;"><%= f.worker_node %></span></td>
+                        <td style="font-size:0.75rem; color:#64748b; white-space:nowrap;"><%= fmt_dt(f.computed_at) %></td>
+                      </tr>
+                    <% end %>
+                  </tbody>
+                </table>
+              </div>
+              <div style="margin-top:0.75rem; font-size:0.75rem; color:#64748b;">
+                <%= length(display) %> / <%= @file_count %> fichier(s)
+                <%= if @search != "", do: " · filtre : \"#{@search}\"" %>
+              </div>
+            <% end %>
           <% end %>
         <% end %>
       </div>
