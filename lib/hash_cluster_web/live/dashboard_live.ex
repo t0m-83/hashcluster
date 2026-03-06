@@ -2,47 +2,65 @@ defmodule HashClusterWeb.DashboardLive do
   use HashClusterWeb, :live_view
   require Logger
 
-  # Refresh léger : job + nodes (pas les fichiers)
-  @refresh_interval 1_000
-  # Refresh lourd : liste complète des fichiers (coûteux avec 20k entrées)
-  @files_refresh_interval 3_000
+  # Intervalles adaptatifs selon l'état
+  @refresh_active   500    # pendant une analyse : progression fluide
+  @refresh_idle     10_000 # au repos : vérification minimale toutes les 10s
+  @files_refresh    4_000  # liste fichiers : seulement quand visible et idle
 
   @impl true
   def mount(_params, _session, socket) do
     if connected?(socket) do
       Phoenix.PubSub.subscribe(HashCluster.PubSub, "dashboard")
-      Process.send_after(self(), :refresh, @refresh_interval)
-      Process.send_after(self(), :refresh_files, @files_refresh_interval)
+      # Démarrer au rythme idle, s'accélérera si un job est actif
+      Process.send_after(self(), :refresh, @refresh_idle)
+      Process.send_after(self(), :refresh_files, @files_refresh)
     end
 
     {:ok,
      socket
      |> assign(:nodes, HashCluster.NodeMonitor.list_nodes())
      |> assign(:job, HashCluster.MnesiaStore.get_current_job())
-     |> assign(:files, HashCluster.MnesiaStore.list_files())
+     |> assign(:files, [])
      |> assign(:file_count, HashCluster.MnesiaStore.count_files())
      |> assign(:new_node, "")
      |> assign(:directory, "/tmp")
      |> assign(:search, "")
-     |> assign(:show_files, false)}
+     |> assign(:show_files, false)
+     |> assign(:files_loaded, false)}
   end
 
   # ---- handle_info ----
 
   @impl true
-  # Changement d'état important (start/stop/done) — met à jour le job uniquement
   def handle_info(:state_changed, socket) do
     job = HashCluster.MnesiaStore.get_current_job()
-    # Quand le job se termine, charger les fichiers et les afficher automatiquement
-    if job && job.status in [:done, :stopped] && is_running?(socket.assigns.job) do
-      {:noreply,
-       socket
-       |> assign(:job, job)
-       |> assign(:show_files, true)
-       |> assign(:files, HashCluster.MnesiaStore.list_files())
-       |> assign(:file_count, HashCluster.MnesiaStore.count_files())}
-    else
-      {:noreply, assign(socket, :job, job)}
+    was_running = is_running?(socket.assigns.job)
+
+    cond do
+      # Le job vient de se terminer normalement
+      was_running && job && job.status == :done ->
+        {:noreply,
+         socket
+         |> clear_flash()
+         |> put_flash(:info, "✅ Analyse terminée — #{job.done} fichiers traités")
+         |> assign(:job, job)
+         |> assign(:show_files, true)
+         |> assign(:files_loaded, true)
+         |> assign(:files, HashCluster.MnesiaStore.list_files())
+         |> assign(:file_count, HashCluster.MnesiaStore.count_files())}
+
+      # Le job vient d'être arrêté manuellement
+      was_running && job && job.status == :stopped ->
+        {:noreply,
+         socket
+         |> assign(:job, job)
+         |> assign(:show_files, true)
+         |> assign(:files_loaded, true)
+         |> assign(:files, HashCluster.MnesiaStore.list_files())
+         |> assign(:file_count, HashCluster.MnesiaStore.count_files())}
+
+      true ->
+        {:noreply, assign(socket, :job, job)}
     end
   end
 
@@ -50,25 +68,46 @@ defmodule HashClusterWeb.DashboardLive do
     {:noreply, assign(socket, :nodes, HashCluster.NodeMonitor.list_nodes())}
   end
 
-  # Refresh léger toutes les 1s : progression + nodes uniquement
+  # Refresh adaptatif : rapide pendant une analyse, lent au repos
   def handle_info(:refresh, socket) do
-    Process.send_after(self(), :refresh, @refresh_interval)
-    {:noreply,
-     socket
-     |> assign(:nodes, HashCluster.NodeMonitor.list_nodes())
-     |> assign(:job, HashCluster.MnesiaStore.get_current_job())
-     |> assign(:file_count, HashCluster.MnesiaStore.count_files())}
+    job = HashCluster.MnesiaStore.get_current_job()
+    running = is_running?(job)
+    # Intervalle selon l'état
+    interval = if running, do: @refresh_active, else: @refresh_idle
+    Process.send_after(self(), :refresh, interval)
+
+    # Au repos sans changement : éviter d'envoyer un diff inutile au navigateur
+    if not running and job == socket.assigns.job do
+      {:noreply, socket}
+    else
+      {:noreply,
+       socket
+       |> assign(:nodes, HashCluster.NodeMonitor.list_nodes())
+       |> assign(:job, job)
+       |> assign(:file_count, HashCluster.MnesiaStore.count_files())}
+    end
   end
 
-  # Refresh lourd toutes les 3s : liste complète des fichiers
+  # Refresh fichiers : seulement si la liste est visible et que rien ne tourne
   def handle_info(:refresh_files, socket) do
-    Process.send_after(self(), :refresh_files, @files_refresh_interval)
-    # Ne charger la liste que si elle est visible ET qu'aucun job ne tourne
-    # (pendant un job, c'est le navigateur qui rame avec 20k lignes en live)
-    if socket.assigns.show_files and not is_running?(socket.assigns.job) do
-      {:noreply, assign(socket, :files, HashCluster.MnesiaStore.list_files())}
-    else
-      {:noreply, socket}
+    Process.send_after(self(), :refresh_files, @files_refresh)
+    running = is_running?(socket.assigns.job)
+    cond do
+      # Analyse en cours : pas de liste à afficher, rien à faire
+      running ->
+        {:noreply, socket}
+      # Liste déjà chargée et stable : ne plus recharger (économise CPU/RAM/WebSocket)
+      socket.assigns.show_files and socket.assigns.files_loaded ->
+        {:noreply, socket}
+      # Liste visible mais pas encore chargée
+      socket.assigns.show_files ->
+        socket2 = assign(socket, :files, [])
+        :erlang.garbage_collect(self())
+        {:noreply, socket2
+          |> assign(:files, HashCluster.MnesiaStore.list_files())
+          |> assign(:files_loaded, true)}
+      true ->
+        {:noreply, socket}
     end
   end
 
@@ -98,22 +137,28 @@ defmodule HashClusterWeb.DashboardLive do
     HashCluster.Coordinator.stop_job()
     {:noreply,
      socket
-     |> put_flash(:info, "Calcul arrêté")
+     |> clear_flash()
+     |> put_flash(:info, "⏹ Analyse arrêtée")
      |> assign(:job, HashCluster.MnesiaStore.get_current_job())
      |> assign(:show_files, true)
+     |> assign(:files_loaded, true)
      |> assign(:files, HashCluster.MnesiaStore.list_files())
      |> assign(:file_count, HashCluster.MnesiaStore.count_files())}
   end
 
   def handle_event("clear_data", _params, socket) do
     HashCluster.MnesiaStore.clear_files()
+    # Forcer le GC sur ce processus LiveView pour libérer @files de la mémoire
+    :erlang.garbage_collect(self())
     {:noreply,
      socket
+     |> clear_flash()
      |> put_flash(:info, "Données effacées")
      |> assign(:job, nil)
      |> assign(:files, [])
      |> assign(:file_count, 0)
-     |> assign(:show_files, false)}
+     |> assign(:show_files, false)
+     |> assign(:files_loaded, false)}
   end
 
   def handle_event("update_node", %{"node" => node}, socket) do
@@ -157,6 +202,7 @@ defmodule HashClusterWeb.DashboardLive do
     {:noreply,
      socket
      |> assign(:show_files, true)
+     |> assign(:files_loaded, true)
      |> assign(:files, HashCluster.MnesiaStore.list_files())
      |> assign(:file_count, HashCluster.MnesiaStore.count_files())}
   end
@@ -164,7 +210,7 @@ defmodule HashClusterWeb.DashboardLive do
   def handle_event("export_json", _params, socket) do
     files = socket.assigns.files
     rows = Enum.map(files, fn f ->
-      %{name: f.name, path: f.path, hash_sha256: f.hash,
+      %{name: f.name, path: f.path, hash_sha256: f.hash, status: f.status,
         worker: to_string(f.worker_node), computed_at: fmt_dt(f.computed_at)}
     end)
     json = Jason.encode!(%{exported_at: DateTime.utc_now(), total: length(rows), files: rows}, pretty: true)
@@ -178,8 +224,7 @@ defmodule HashClusterWeb.DashboardLive do
   defp filtered_files(files, q) do
     q = String.downcase(q)
     Enum.filter(files, fn f ->
-      String.contains?(String.downcase(f.name || ""), q) or
-        String.contains?(String.downcase(f.path || ""), q)
+      String.contains?(String.downcase(f.name || ""), q)
     end)
   end
 
@@ -187,6 +232,7 @@ defmodule HashClusterWeb.DashboardLive do
   defp job_badge(%{status: :running}), do: {"⚡ En cours", "badge-blue"}
   defp job_badge(%{status: :done}),    do: {"✓ Terminé", "badge-green"}
   defp job_badge(%{status: :stopped}), do: {"⏹ Arrêté", "badge-yellow"}
+  defp job_badge(%{status: :scanning}), do: {"🔍 Scan en cours…", "badge-blue"}
   defp job_badge(%{status: :pending}), do: {"⏳ En attente", "badge-gray"}
   defp job_badge(_), do: {"—", "badge-gray"}
 
@@ -200,6 +246,7 @@ defmodule HashClusterWeb.DashboardLive do
 
   defp is_running?(nil), do: false
   defp is_running?(%{status: :running}), do: true
+  defp is_running?(%{status: :scanning}), do: true
   defp is_running?(_), do: false
 
   @impl true
@@ -323,10 +370,14 @@ defmodule HashClusterWeb.DashboardLive do
           <div style="text-align:center; padding:2rem; color:#94a3b8;">
             <div style="font-size:2.5rem; margin-bottom:1rem; animation: pulse 1.5s infinite;">⚙️</div>
             <p style="font-size:1rem; font-weight:600; color:#f1f5f9; margin-bottom:0.5rem;">
-              Analyse en cours…
+              <%= if @job && @job.status == :scanning, do: "Scan du répertoire en cours…", else: "Analyse en cours…" %>
             </p>
             <p style="font-size:0.85rem; margin-bottom:1.5rem;">
-              <%= @file_count %> / <%= if @job, do: @job.total, else: "?" %> fichiers traités
+              <%= if @job && @job.status == :scanning do %>
+                Comptage des fichiers, veuillez patienter…
+              <% else %>
+                <%= @file_count %> / <%= if @job, do: @job.total, else: "?" %> fichiers traités
+              <% end %>
             </p>
             <p style="font-size:0.75rem; color:#475569;">
               La liste des fichiers sera affichée à la fin de l'analyse pour ne pas surcharger le navigateur.
@@ -404,7 +455,20 @@ defmodule HashClusterWeb.DashboardLive do
                       <tr>
                         <td style="font-weight:500; color:#f1f5f9; max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"><%= f.name %></td>
                         <td style="font-family:monospace; font-size:0.73rem; color:#94a3b8; max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title={f.path}><%= f.path %></td>
-                        <td style="font-family:monospace; font-size:0.7rem; color:#60a5fa;" title={f.hash}><%= String.slice(f.hash || "", 0, 20) %>…</td>
+                        <td style="font-family:monospace; font-size:0.7rem;" title={f.hash}>
+                          <%= cond do %>
+                            <% f.status == :permission_denied -> %>
+                              <span style="color:#f87171;">⛔ Droits insuffisants</span>
+                            <% f.status == :timeout -> %>
+                              <span style="color:#fb923c;">⏱ Timeout</span>
+                            <% f.status == :error -> %>
+                              <span style="color:#fb923c;">⚠ Erreur lecture</span>
+                            <% f.hash != nil -> %>
+                              <span style="color:#60a5fa;"><%= String.slice(f.hash, 0, 20) %>…</span>
+                            <% true -> %>
+                              <span style="color:#64748b;">—</span>
+                          <% end %>
+                        </td>
                         <td><span class="badge badge-blue" style="font-size:0.65rem; font-family:monospace;"><%= f.worker_node %></span></td>
                         <td style="font-size:0.75rem; color:#64748b; white-space:nowrap;"><%= fmt_dt(f.computed_at) %></td>
                       </tr>

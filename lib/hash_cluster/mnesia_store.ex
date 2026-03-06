@@ -6,26 +6,21 @@ defmodule HashCluster.MnesiaStore do
 
   def setup do
     node = node()
+    # Supprimer le schéma disque existant pour éviter de recharger
+    # les anciennes données (disc_copies) au démarrage
+    :mnesia.delete_schema([node])
     case :mnesia.create_schema([node]) do
-      :ok -> Logger.info("Mnesia schema created on disk")
-      {:error, {^node, {:already_exists, ^node}}} -> Logger.info("Mnesia schema already exists")
+      :ok -> Logger.info("Mnesia schema créé")
+      {:error, {^node, {:already_exists, ^node}}} -> Logger.info("Mnesia schema existant")
       err -> Logger.warning("Mnesia schema: #{inspect(err)}")
     end
     :mnesia.start()
-    copy_type = schema_copy_type()
-    Logger.info("Using Mnesia copy type: #{copy_type}")
-    create_table(@table_files, [{:attributes, [:path, :name, :hash, :worker_node, :computed_at, :status]}, {copy_type, [node]}])
-    create_table(@table_jobs,  [{:attributes, [:id, :directory, :status, :started_at, :finished_at, :total, :done]}, {copy_type, [node]}])
+    # hash_files : toujours ram_copies — données recalculables, pas besoin de persistance
+    # hash_jobs  : ram_copies aussi — on ne veut pas recharger 20k entrées au démarrage
+    create_table(@table_files, [{:attributes, [:path, :name, :hash, :worker_node, :computed_at, :status]}, {:ram_copies, [node]}])
+    create_table(@table_jobs,  [{:attributes, [:id, :directory, :status, :started_at, :finished_at, :total, :done]}, {:ram_copies, [node]}])
+    Logger.info("Mnesia tables initialisées en ram_copies")
     :ok
-  end
-
-  defp schema_copy_type do
-    case :mnesia.table_info(:schema, :storage_type) do
-      :disc_copies -> :disc_copies
-      _ -> :ram_copies
-    end
-  rescue
-    _ -> :ram_copies
   end
 
   defp create_table(name, opts) do
@@ -104,6 +99,19 @@ defmodule HashCluster.MnesiaStore do
     :ok
   end
 
+  # Enregistre un fichier inaccessible et incrémente quand même le compteur
+  def save_error_and_increment(path, name, status, worker_node, job_id) do
+    :mnesia.transaction(fn ->
+      :mnesia.write({@table_files, path, name, nil, worker_node, DateTime.utc_now(), status})
+      case :mnesia.read(@table_jobs, job_id) do
+        [{@table_jobs, ^job_id, dir, s, started, finished, total, done}] ->
+          :mnesia.write({@table_jobs, job_id, dir, s, started, finished, total, done + 1})
+        _ -> :ok
+      end
+    end)
+    :ok
+  end
+
   # Pas de broadcast — le LiveView poll toutes les 2s
   def increment_done(job_id) do
     :mnesia.transaction(fn ->
@@ -132,8 +140,15 @@ defmodule HashCluster.MnesiaStore do
   end
 
   def clear_files do
-    :mnesia.clear_table(@table_files)
-    :mnesia.clear_table(@table_jobs)
+    # clear_table vide les données mais Mnesia garde la mémoire ETS allouée.
+    # delete_table + recréer force la libération réelle de la RAM.
+    node = node()
+    :mnesia.delete_table(@table_files)
+    :mnesia.delete_table(@table_jobs)
+    create_table(@table_files, [{:attributes, [:path, :name, :hash, :worker_node, :computed_at, :status]}, {:ram_copies, [node]}])
+    create_table(@table_jobs,  [{:attributes, [:id, :directory, :status, :started_at, :finished_at, :total, :done]}, {:ram_copies, [node]}])
+    # GC global pour libérer les binaires orphelins
+    for pid <- Process.list(), do: :erlang.garbage_collect(pid)
     broadcast_now()
   end
 
