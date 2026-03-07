@@ -154,14 +154,12 @@ Il est également possible d'ajouter un worker manuellement depuis l'interface e
 
 ## Variables d'environnement
 
-|------------------|----------------------|-----------------------------------------------|
 |     Variable     |        Défaut        |                Description                    |
 |------------------|----------------------|-----------------------------------------------|
 |  `MASTER_NODE`   | `master@<hostname>`  |          Nom complet du nœud maître           |
 |  `WORKER_NAME`   | `worker1@<hostname>` |            Nom complet du worker              |
 | `CLUSTER_COOKIE` | `hashcluster_secret` | Secret partagé — identique sur tous les nœuds |
 |      `PORT`      |       `4000`         |              Port HTTP Phoenix                |
-|------------------|----------------------|-----------------------------------------------|
 
 ---
 
@@ -178,7 +176,6 @@ Il est également possible d'ajouter un worker manuellement depuis l'interface e
 
 Chaque fichier analysé apparaît dans le tableau avec :
 
-|--------------|---------------------------------------------------------------|
 |    Colonne   |                         Description                           |
 |--------------|---------------------------------------------------------------|
 |      Nom     |                        Nom du fichier                         |
@@ -186,7 +183,6 @@ Chaque fichier analysé apparaît dans le tableau avec :
 | Hash SHA-256 | Hash hexadécimal (tronqué à 20 caractères, complet au survol) |
 |    Worker    |                   Nœud qui a calculé le hash                  |
 |     Date     |                     Horodatage du calcul                      |
-|--------------|---------------------------------------------------------------|
 
 Les fichiers qui n'ont pas pu être hashés affichent un statut à la place du hash :
 
@@ -217,13 +213,11 @@ Exemples : 1 Go → ~17 min | 10 Go → ~2h54 (plafonné 2h) | 40 Go → 2h.
 
 ### Ports à ouvrir
 
-|-----------|-------------------------------------------|
 |   Port    |                  Usage                    |
 |-----------|-------------------------------------------|
 |   4369    |      EPMD (Erlang Port Mapper Daemon)     |
 | 9000–9100 |   Distribution Erlang (ports dynamiques)  |
 |   4000    | Interface web Phoenix (maître uniquement) |
-|-----------|-------------------------------------------|
 
 **NixOS :**
 ```nix
