@@ -1,0 +1,9 @@
+# Ignorer tout le dossier des assets pour les statistiques
+assets/** linguist-vendored
+
+# Ou ignorer spécifiquement tous les fichiers JS si c'est un projet pur Elixir
+*.js linguist-detectable=false
+*.jsx linguist-detectable=false
+
+# Forcer certains fichiers à être considérés comme de la documentation
+docs/*.js linguist-documentation
