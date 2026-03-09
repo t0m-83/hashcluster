@@ -10,6 +10,14 @@ Calcul distribué de hachages SHA-256 sur un cluster Erlang/Elixir. HashCluster 
 - **Frontend** : Phoenix LiveView — temps réel sans JavaScript custom
 - **Stockage** : Mnesia en RAM (données non persistantes)
 
+<p align="center">
+  <img src="assets/hashcluster_screenshot_01.png" alt="HashCluster_Screenshot_01" width="100%">
+</p>
+
+<p align="center">
+  <img src="assets/hashcluster_screenshot_02.png" alt="HashCluster_Screenshot_02" width="100%">
+</p>
+
 ---
 
 ## Fonctionnalités
